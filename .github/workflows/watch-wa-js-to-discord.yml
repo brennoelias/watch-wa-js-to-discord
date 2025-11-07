@@ -172,7 +172,7 @@ jobs:
           )
 
           # Também guarda o SHA mais novo (pra dedupe adicional)
-          NEWEST_SHA=$(echo "$RESP" | jq -r 'max_by(.commit.author.date)?.sha // empty')
+          NEWEST_SHA=$(echo "$RESP" | jq -r '(max_by(.commit.author.date) | .sha) // empty')
 
           {
             echo "count=$COUNT"
