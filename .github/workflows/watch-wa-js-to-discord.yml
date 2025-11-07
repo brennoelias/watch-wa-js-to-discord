@@ -145,7 +145,7 @@ jobs:
             done
           )
 
-          NEWEST=$(echo "$RESP" | jq -r 'max_by(.commit.author.date)?.commit.author.date // empty')
+          NEWEST=$(echo "$RESP" | jq -r '(max_by(.commit.author.date) | .commit.author.date) // empty')
 
           {
             echo "count=$COUNT"
