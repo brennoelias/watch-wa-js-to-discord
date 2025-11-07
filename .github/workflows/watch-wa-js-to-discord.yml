@@ -32,7 +32,7 @@ jobs:
           BODY=$(echo "$RESP" | jq -r .body)
           PUB_RAW=$(echo "$RESP" | jq -r .published_at)
 
-          # timestamp em epoch (segundos) para usar <t:EPOCH:R>
+          # epoch (segundos) para usar <t:EPOCH:R>
           PUB_EPOCH=$(date -d "$PUB_RAW" +%s 2>/dev/null || gdate -d "$PUB_RAW" +%s)
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -40,10 +40,10 @@ jobs:
           echo "url=$URL"   >> "$GITHUB_OUTPUT"
           echo "pub_epoch=$PUB_EPOCH" >> "$GITHUB_OUTPUT"
 
-          BODY_TRUNC=$(printf "%s" "$BODY" | head -c 1800)
+          # corpo bruto (vai ser limpo no passo de postagem)
           {
             echo "body<<EOF"
-            echo "$BODY_TRUNC"
+            echo "$BODY"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -64,7 +64,7 @@ jobs:
           PUB_EPOCH='${{ steps.rel_fetch.outputs.pub_epoch }}'
           BODY_RAW='${{ steps.rel_fetch.outputs.body }}'
 
-          # Remove linhas com o próprio nome/versão e cabeçalhos redundantes; colapsa múltiplas linhas em uma só
+          # Limpeza do corpo: remove linhas redundantes (nome/versão), remove cabeçalho "## <tag>", colapsa múltiplas linhas em uma só
           BODY_CLEAN=$(printf "%s\n" "$BODY_RAW" \
             | sed -E "s/\r//g" \
             | sed -E "/^${TAG//./\\.}\$/Id" \
@@ -72,10 +72,11 @@ jobs:
             | sed -E "s/^##[[:space:]]*${TAG//./\\.}.*//I" \
             | awk 'BEGIN{blank=0} { if(length($0)==0){ if(blank==0){ print ""; blank=1 } } else { print; blank=0 } }')
 
-          # Enxuga espaços extras de início/fim e limita tamanho
+          # Enxuga espaços das bordas e limita tamanho
           BODY_TRUNC=$(printf "%s" "$BODY_CLEAN" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | head -c 1400)
 
-          DESC="*Publicado:* <t:${PUB_EPOCH}:R>\n\n**Notas:**\n${BODY_TRUNC}"
+          # Usa printf para criar quebras reais (sem \n literais)
+          DESC=$(printf "*Publicado:* <t:%s:R>\n\n**Notas:**\n%s" "$PUB_EPOCH" "$BODY_TRUNC")
 
           payload=$(jq -n \
             --arg title "🧩 Nova versão: ${TAG}" \
@@ -115,7 +116,7 @@ jobs:
             echo "since=$(cat .wa-js-state/last_fix_iso)" >> "$GITHUB_OUTPUT"
             echo "initial=false" >> "$GITHUB_OUTPUT"
           else
-            # sem cursor ainda -> modo bootstrap
+            # sem cursor ainda -> modo bootstrap (deixa since vazio; vamos pegar um lote sem since)
             echo "since=" >> "$GITHUB_OUTPUT"
             echo "initial=true" >> "$GITHUB_OUTPUT"
           fi
@@ -127,15 +128,15 @@ jobs:
           SINCE='${{ steps.fix_state.outputs.since }}'
 
           if [ "$INITIAL" = "true" ]; then
-            # Bootstrap: pega um lote recente sem since, limitado
-            API_BASE="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&per_page=50"
-            RESP=$(curl -sS "$API_BASE")
+            # Bootstrap: pega um lote recente sem since (até 100)
+            API="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&per_page=100"
+            RESP=$(curl -sS "$API")
           else
-            API_BASE="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&since=${SINCE}"
-            RESP=$(curl -sS "$API_BASE")
+            API="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&since=${SINCE}"
+            RESP=$(curl -sS "$API")
           fi
 
-          # Commits que parecem correções
+          # Filtra commits que parecem correções
           FILTERED=$(echo "$RESP" | jq -r '
             map({
               sha: .sha,
@@ -148,7 +149,6 @@ jobs:
           ')
 
           if [ "$INITIAL" = "true" ]; then
-            # No bootstrap, notificamos APENAS o fix mais novo (se houver)
             COUNT=$(echo "$FILTERED" | jq 'length')
             if [ "$COUNT" -gt 0 ]; then
               ONE=$(echo "$FILTERED" | jq -c 'max_by(.date_raw)')
@@ -158,12 +158,12 @@ jobs:
               URL=$(echo "$ONE" | jq -r .url)
               MSG=$(echo "$ONE" | jq -r '.msg | split("\n")[0]')
               AUTHOR=$(echo "$ONE" | jq -r .author)
-              SUMMARY=$(printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL")
+
+              SUMMARY=$(printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL")
               NEWEST="$RAW"
               BOOT_COUNT=1
             else
               SUMMARY=""
-              # Sem fix encontrado; ainda assim avançamos o cursor para o commit mais novo geral (se houver)
               NEWEST=$(echo "$RESP" | jq -r '(max_by(.commit.author.date) | .commit.author.date) // empty')
               BOOT_COUNT=0
             fi
@@ -177,7 +177,6 @@ jobs:
             } >> "$GITHUB_OUTPUT"
 
           else
-            # Fluxo normal (since=cursor): lista até 5 para o resumo
             COUNT=$(echo "$FILTERED" | jq 'length')
 
             SUMMARY=$(
@@ -188,7 +187,7 @@ jobs:
                 URL=$(echo "$row" | jq -r .url)
                 MSG=$(echo "$row" | jq -r '.msg | split("\n")[0]')
                 AUTHOR=$(echo "$row" | jq -r .author)
-                printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL"
+                printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL"
               done
             )
 
@@ -211,16 +210,16 @@ jobs:
           COUNT='${{ steps.fix_fetch.outputs.count }}'
           SUMMARY='${{ steps.fix_fetch.outputs.summary }}'
 
-          # Dá mais respiro visual: cabeçalho + quebras extras entre itens
-          DESC="**— Últimos fixes —**\n\n${SUMMARY}\n"
-
+          DESC_HEADER="**— Últimos fixes —**"
           EXTRA=""
           if [ "$COUNT" -gt 5 ]; then
-            EXTRA="\n…e +$((COUNT-5)) outros"
+            EXTRA=$(printf "\n…e +%s outros" "$((COUNT-5))")
           fi
 
+          DESC=$(printf "%s\n\n%s%s" "$DESC_HEADER" "$SUMMARY" "$EXTRA")
+
           payload=$(jq -n \
-            --arg desc "${DESC}${EXTRA}" \
+            --arg desc "$DESC" \
             '{
               username: "Fix Watcher",
               embeds: [{
