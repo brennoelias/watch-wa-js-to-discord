@@ -62,10 +62,20 @@ jobs:
           NAME='${{ steps.rel_fetch.outputs.name }}'
           URL='${{ steps.rel_fetch.outputs.url }}'
           PUB_EPOCH='${{ steps.rel_fetch.outputs.pub_epoch }}'
-          BODY='${{ steps.rel_fetch.outputs.body }}'
+          BODY_RAW='${{ steps.rel_fetch.outputs.body }}'
 
-          # usa timestamp nativo do Discord <t:UNIX:R> (relativo)
-          DESC="*Publicado:* <t:${PUB_EPOCH}:R>\n\n${NAME}\n\n${BODY}"
+          # Remove linhas com o próprio nome/versão e cabeçalhos redundantes; colapsa múltiplas linhas em uma só
+          BODY_CLEAN=$(printf "%s\n" "$BODY_RAW" \
+            | sed -E "s/\r//g" \
+            | sed -E "/^${TAG//./\\.}\$/Id" \
+            | sed -E "/^${NAME//./\\.}\$/Id" \
+            | sed -E "s/^##[[:space:]]*${TAG//./\\.}.*//I" \
+            | awk 'BEGIN{blank=0} { if(length($0)==0){ if(blank==0){ print ""; blank=1 } } else { print; blank=0 } }')
+
+          # Enxuga espaços extras de início/fim e limita tamanho
+          BODY_TRUNC=$(printf "%s" "$BODY_CLEAN" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | head -c 1400)
+
+          DESC="*Publicado:* <t:${PUB_EPOCH}:R>\n\n**Notas:**\n${BODY_TRUNC}"
 
           payload=$(jq -n \
             --arg title "🧩 Nova versão: ${TAG}" \
@@ -200,18 +210,22 @@ jobs:
         run: |
           COUNT='${{ steps.fix_fetch.outputs.count }}'
           SUMMARY='${{ steps.fix_fetch.outputs.summary }}'
+
+          # Dá mais respiro visual: cabeçalho + quebras extras entre itens
+          DESC="**— Últimos fixes —**\n\n${SUMMARY}\n"
+
           EXTRA=""
           if [ "$COUNT" -gt 5 ]; then
             EXTRA="\n…e +$((COUNT-5)) outros"
           fi
 
           payload=$(jq -n \
-            --arg desc "${SUMMARY}${EXTRA}" \
+            --arg desc "${DESC}${EXTRA}" \
             '{
               username: "Fix Watcher",
               embeds: [{
                 title: "🛠️ Fix commits detectados na main",
-                description: ($desc // "*nenhum*"),
+                description: $desc,
                 color: 16098851,
                 footer: { text: "wppconnect-team/wa-js • commits" }
               }]
