@@ -100,18 +100,19 @@ jobs:
           git push
 
       ############################################################
-      # 2) FIX COMMITS NA BRANCH main (com bootstrap na 1ª vez)
+      # 2) FIX COMMITS NA BRANCH main (com bootstrap + dedupe)
       ############################################################
-      - name: Ler cursor de commits (ISO)
+      - name: Ler cursor de commits (ISO e SHA)
         id: fix_state
         run: |
           mkdir -p .wa-js-state
           if [[ -f .wa-js-state/last_fix_iso ]]; then
             echo "since=$(cat .wa-js-state/last_fix_iso)" >> "$GITHUB_OUTPUT"
+            echo "lastsha=$(cat .wa-js-state/last_fix_sha 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
             echo "initial=false" >> "$GITHUB_OUTPUT"
           else
-            # sem cursor ainda -> modo bootstrap (deixa since vazio)
-            echo "since=" >> "$GITHUB_OUTPUT"
+            echo "since=" >> "$GITHUB_OUTPUT"     # bootstrap
+            echo "lastsha=" >> "$GITHUB_OUTPUT"
             echo "initial=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -120,9 +121,9 @@ jobs:
         run: |
           INITIAL='${{ steps.fix_state.outputs.initial }}'
           SINCE='${{ steps.fix_state.outputs.since }}'
+          LASTSHA='${{ steps.fix_state.outputs.lastsha }}'
 
           if [ "$INITIAL" = "true" ]; then
-            # Bootstrap: pega um lote recente sem since (até 100)
             API="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&per_page=100"
             RESP=$(curl -sS "$API")
           else
@@ -130,70 +131,57 @@ jobs:
             RESP=$(curl -sS "$API")
           fi
 
-          # Filtra commits que parecem correções
-          FILTERED=$(echo "$RESP" | jq -r '
-            map({
-              sha: .sha,
-              url: .html_url,
-              msg: .commit.message,
-              author: (.commit.author.name // "desconhecido"),
-              date_raw: .commit.author.date
-            })
-            | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
-          ')
+          # Extrai commits relevantes e aplica dedupe por ISO e SHA
+          FILTERED=$(
+            echo "$RESP" | jq -r --arg last "${SINCE}" --arg lastsha "${LASTSHA}" '
+              map({
+                sha: .sha,
+                url: .html_url,
+                msg: .commit.message,
+                author: (.commit.author.name // "desconhecido"),
+                date_raw: .commit.author.date
+              })
+              | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
+              # estritamente depois do ISO salvo (evita repetir fronteira)
+              | map(select(($last == "") or (.date_raw > $last)))
+              # e não repetir exatamente o último SHA salvo
+              | map(select(.sha != $lastsha))
+            '
+          )
 
-          if [ "$INITIAL" = "true" ]; then
-            COUNT=$(echo "$FILTERED" | jq 'length')
-            if [ "$COUNT" -gt 0 ]; then
-              ONE=$(echo "$FILTERED" | jq -c 'max_by(.date_raw)')
-              EPOCH=$(echo "$ONE" | jq -r '.date_raw | fromdate? // empty')
-              SHA=$(echo "$ONE" | jq -r .sha | cut -c1-7)
-              URL=$(echo "$ONE" | jq -r .url)
-              MSG=$(echo "$ONE" | jq -r '.msg | split("\n")[0]')
-              AUTHOR=$(echo "$ONE" | jq -r .author)
-              RAW=$(echo "$ONE" | jq -r .date_raw)
+          COUNT=$(echo "$FILTERED" | jq 'length')
 
-              SUMMARY=$(printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL")
-              NEWEST="$RAW"
-              BOOT_COUNT=1
-            else
-              SUMMARY=""
-              NEWEST=$(echo "$RESP" | jq -r '(max_by(.commit.author.date) | .commit.author.date) // empty')
-              BOOT_COUNT=0
-            fi
+          # Monta SUMMARY (até 5) com timestamp relativo
+          SUMMARY=$(
+            echo "$FILTERED" | jq -c '.[:5][]' | while read -r row; do
+              EPOCH=$(echo "$row" | jq -r '.date_raw | fromdate? // empty')
+              SHA=$(echo "$row" | jq -r .sha | cut -c1-7)
+              URL=$(echo "$row" | jq -r .url)
+              MSG=$(echo "$row" | jq -r '.msg | split("\n")[0]')
+              AUTHOR=$(echo "$row" | jq -r .author)
+              printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL"
+            done
+          )
 
-            {
-              echo "count=$BOOT_COUNT"
-              echo "summary<<EOF"
-              echo "${SUMMARY:-}"
-              echo "EOF"
-              echo "newest=$NEWEST"
-            } >> "$GITHUB_OUTPUT"
+          # Pega o commit mais novo retornado (qualquer tipo), e gera ISO +1s pra cursor seguro
+          NEWEST_PLUS=$(
+            echo "$RESP" | jq -r '
+              (max_by(.commit.author.date) | .commit.author.date | fromdate? // empty) as $t
+              | if $t then ($t + 1 | todate) else empty end
+            '
+          )
 
-          else
-            COUNT=$(echo "$FILTERED" | jq 'length')
+          # Também guarda o SHA mais novo (pra dedupe adicional)
+          NEWEST_SHA=$(echo "$RESP" | jq -r 'max_by(.commit.author.date)?.sha // empty')
 
-            SUMMARY=$(
-              echo "$FILTERED" | jq -c '.[:5][]' | while read -r row; do
-                EPOCH=$(echo "$row" | jq -r '.date_raw | fromdate? // empty')
-                SHA=$(echo "$row" | jq -r .sha | cut -c1-7)
-                URL=$(echo "$row" | jq -r .url)
-                MSG=$(echo "$row" | jq -r '.msg | split("\n")[0]')
-                AUTHOR=$(echo "$row" | jq -r .author)
-                printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL"
-              done
-            )
-
-            NEWEST=$(echo "$RESP" | jq -r '(max_by(.commit.author.date) | .commit.author.date) // empty')
-
-            {
-              echo "count=$COUNT"
-              echo "summary<<EOF"
-              echo "${SUMMARY:-}"
-              echo "EOF"
-              echo "newest=$NEWEST"
-            } >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "count=$COUNT"
+            echo "summary<<EOF"
+            echo "${SUMMARY:-}"
+            echo "EOF"
+            echo "newest_plus=$NEWEST_PLUS"
+            echo "newest_sha=$NEWEST_SHA"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Postar no Discord (se houver fix-commits)
         if: steps.fix_fetch.outputs.count != '0'
@@ -224,12 +212,22 @@ jobs:
 
           curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
 
-      - name: Avançar cursor de commits
-        if: steps.fix_fetch.outputs.newest != ''
+      - name: Avançar cursor de commits (sempre que houver referência)
+        if: steps.fix_fetch.outputs.newest_plus != '' || steps.fix_fetch.outputs.newest_sha != ''
         run: |
-          echo '${{ steps.fix_fetch.outputs.newest }}' > .wa-js-state/last_fix_iso
+          mkdir -p .wa-js-state
+          # Atualiza ISO (cursor +1s) se existir
+          if [ -n '${{ steps.fix_fetch.outputs.newest_plus }}' ]; then
+            echo '${{ steps.fix_fetch.outputs.newest_plus }}' > .wa-js-state/last_fix_iso
+            git add .wa-js-state/last_fix_iso
+          fi
+          # Atualiza SHA mais novo (para dedupe) se existir
+          if [ -n '${{ steps.fix_fetch.outputs.newest_sha }}' ]; then
+            echo '${{ steps.fix_fetch.outputs.newest_sha }}' > .wa-js-state/last_fix_sha
+            git add .wa-js-state/last_fix_sha
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .wa-js-state/last_fix_iso
-          git commit -m "chore: wa-js last_fix_iso -> ${{ steps.fix_fetch.outputs.newest }}" || echo "Nada pra commitar (commits)"
+          git commit -m "chore: update fix cursors (iso+sha)" || echo "Nada pra commitar (commits)"
           git push
