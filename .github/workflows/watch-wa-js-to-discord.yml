@@ -1,24 +1,28 @@
-name: Watch wa-js releases -> Discord
+name: Watch wa-js -> Discord (releases + fix commits)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/30 * * * *"  # a cada 30 min
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
-  check-release:
+  watch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (pra salvar estado)
+        uses: actions/checkout@v4
 
       - name: Instalar jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      ############################################################
+      # 1) RELEASES
+      ############################################################
       - name: Buscar último release do wa-js
-        id: fetch
+        id: rel_fetch
         run: |
           API="https://api.github.com/repos/wppconnect-team/wa-js/releases/latest"
           RESP=$(curl -sS "$API")
@@ -26,44 +30,163 @@ jobs:
           NAME=$(echo "$RESP" | jq -r .name)
           URL=$(echo "$RESP" | jq -r .html_url)
           BODY=$(echo "$RESP" | jq -r .body)
+          PUB_RAW=$(echo "$RESP" | jq -r .published_at)
+
+          # timestamp em epoch (segundos) para usar <t:EPOCH:R>
+          PUB_EPOCH=$(date -d "$PUB_RAW" +%s 2>/dev/null || gdate -d "$PUB_RAW" +%s)
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "url=$URL"   >> "$GITHUB_OUTPUT"
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "$BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "pub_epoch=$PUB_EPOCH" >> "$GITHUB_OUTPUT"
 
-      - name: Lê última tag salva
-        id: state
+          BODY_TRUNC=$(printf "%s" "$BODY" | head -c 1800)
+          {
+            echo "body<<EOF"
+            echo "$BODY_TRUNC"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Lê estado de release salvo
+        id: rel_state
         run: |
           mkdir -p .wa-js-state
-          if [[ -f .wa-js-state/last_tag ]]; then cat .wa-js-state/last_tag; else echo ""; fi > last
-          echo "last=$(cat last)" >> "$GITHUB_OUTPUT"
+          echo "last=$(cat .wa-js-state/last_tag 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
 
-      - name: Envia mensagem no Discord se mudou
-        if: steps.fetch.outputs.tag != steps.state.outputs.last && steps.fetch.outputs.tag != 'null'
+      - name: Posta no Discord (se release mudou)
+        if: steps.rel_fetch.outputs.tag != steps.rel_state.outputs.last && steps.rel_fetch.outputs.tag != 'null'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
-          payload=$(jq -n --arg tag "${{ steps.fetch.outputs.tag }}" --arg name "${{ steps.fetch.outputs.name }}" --arg url "${{ steps.fetch.outputs.url }}" --arg body "${{ steps.fetch.outputs.body }}" '
-          {
-            username: "wa-js Watcher",
-            embeds: [{
-              title: "Nova versão: \($tag)",
-              url: $url,
-              description: ($name + "\n\n" + $body),
-              color: 5814783
-            }]
-          }')
-          curl -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+          TAG='${{ steps.rel_fetch.outputs.tag }}'
+          NAME='${{ steps.rel_fetch.outputs.name }}'
+          URL='${{ steps.rel_fetch.outputs.url }}'
+          PUB_EPOCH='${{ steps.rel_fetch.outputs.pub_epoch }}'
+          BODY='${{ steps.rel_fetch.outputs.body }}'
 
-      - name: Atualiza estado
-        if: steps.fetch.outputs.tag != steps.state.outputs.last && steps.fetch.outputs.tag != 'null'
+          # usa timestamp nativo do Discord <t:UNIX:R> (relativo)
+          DESC="*Publicado:* <t:${PUB_EPOCH}:R>\n\n${NAME}\n\n${BODY}"
+
+          payload=$(jq -n \
+            --arg title "🧩 Nova versão: ${TAG}" \
+            --arg url "$URL" \
+            --arg desc "$DESC" \
+            '{
+              username: "Release Watcher",
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 5814783,
+                footer: { text: "wppconnect-team/wa-js • release" }
+              }]
+            }')
+
+          curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+
+      - name: Atualiza estado de release
+        if: steps.rel_fetch.outputs.tag != steps.rel_state.outputs.last && steps.rel_fetch.outputs.tag != 'null'
         run: |
-          echo "${{ steps.fetch.outputs.tag }}" > .wa-js-state/last_tag
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          echo '${{ steps.rel_fetch.outputs.tag }}' > .wa-js-state/last_tag
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .wa-js-state/last_tag
-          git commit -m "update last_tag"
+          git commit -m "chore: wa-js last_tag -> ${{ steps.rel_fetch.outputs.tag }}" || echo "Nada pra commitar (release)"
+          git push
+
+      ############################################################
+      # 2) FIX COMMITS NA BRANCH main
+      ############################################################
+      - name: Lê cursor de commits (ISO)
+        id: fix_state
+        run: |
+          mkdir -p .wa-js-state
+          if [[ -f .wa-js-state/last_fix_iso ]]; then
+            CUR=$(cat .wa-js-state/last_fix_iso)
+            INIT="false"
+          else
+            CUR=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            echo "$CUR" > .wa-js-state/last_fix_iso
+            INIT="true"
+          fi
+          echo "since=$CUR" >> "$GITHUB_OUTPUT"
+          echo "initial=$INIT" >> "$GITHUB_OUTPUT"
+
+      - name: Buscar commits recentes na main (desde cursor)
+        id: fix_fetch
+        run: |
+          SINCE='${{ steps.fix_state.outputs.since }}'
+          API="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&since=${SINCE}"
+          RESP=$(curl -sS "$API")
+
+          FILTERED=$(echo "$RESP" | jq -r '
+            map({
+              sha: .sha,
+              url: .html_url,
+              msg: .commit.message,
+              author: (.commit.author.name // "desconhecido"),
+              date_raw: .commit.author.date
+            })
+            | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
+          ')
+
+          COUNT=$(echo "$FILTERED" | jq 'length')
+
+          # converte cada data para epoch e gera resumo
+          SUMMARY=$(
+            echo "$FILTERED" | jq -c '.[:5][]' | while read -r row; do
+              RAW=$(echo "$row" | jq -r .date_raw)
+              EPOCH=$(date -d "$RAW" +%s 2>/dev/null || gdate -d "$RAW" +%s)
+              SHA=$(echo "$row" | jq -r .sha | cut -c1-7)
+              URL=$(echo "$row" | jq -r .url)
+              MSG=$(echo "$row" | jq -r '.msg | split("\n")[0]')
+              AUTHOR=$(echo "$row" | jq -r .author)
+              printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL"
+            done
+          )
+
+          NEWEST=$(echo "$RESP" | jq -r 'max_by(.commit.author.date)?.commit.author.date // empty')
+
+          {
+            echo "count=$COUNT"
+            echo "summary<<EOF"
+            echo "${SUMMARY:-}"
+            echo "EOF"
+            echo "newest=$NEWEST"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Posta no Discord (se houver novos fix-commits)
+        if: steps.fix_state.outputs.initial == 'false' && steps.fix_fetch.outputs.count != '0'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          COUNT='${{ steps.fix_fetch.outputs.count }}'
+          SUMMARY='${{ steps.fix_fetch.outputs.summary }}'
+          EXTRA=""
+          if [ "$COUNT" -gt 5 ]; then
+            EXTRA="\n…e +$((COUNT-5)) outros"
+          fi
+
+          payload=$(jq -n \
+            --arg desc "${SUMMARY}${EXTRA}" \
+            '{
+              username: "Fix Watcher",
+              embeds: [{
+                title: "🛠️ Fix commits detectados na main",
+                description: ($desc // "*nenhum*"),
+                color: 16098851,
+                footer: { text: "wppconnect-team/wa-js • commits" }
+              }]
+            }')
+
+          curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+
+      - name: Avança cursor de commits
+        if: steps.fix_fetch.outputs.newest != ''
+        run: |
+          echo '${{ steps.fix_fetch.outputs.newest }}' > .wa-js-state/last_fix_iso
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .wa-js-state/last_fix_iso
+          git commit -m "chore: wa-js last_fix_iso -> ${{ steps.fix_fetch.outputs.newest }}" || echo "Nada pra commitar (commits)"
           git push
