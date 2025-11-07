@@ -30,17 +30,12 @@ jobs:
           NAME=$(echo "$RESP" | jq -r .name)
           URL=$(echo "$RESP" | jq -r .html_url)
           BODY=$(echo "$RESP" | jq -r .body)
-          PUB_RAW=$(echo "$RESP" | jq -r .published_at)
-
-          # epoch (segundos) para usar <t:EPOCH:R>
-          PUB_EPOCH=$(date -d "$PUB_RAW" +%s 2>/dev/null || gdate -d "$PUB_RAW" +%s)
+          PUB_EPOCH=$(echo "$RESP" | jq -r '.published_at | fromdate? // empty')
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "url=$URL"   >> "$GITHUB_OUTPUT"
           echo "pub_epoch=$PUB_EPOCH" >> "$GITHUB_OUTPUT"
-
-          # corpo bruto (vai ser limpo no passo de postagem)
           {
             echo "body<<EOF"
             echo "$BODY"
@@ -64,7 +59,7 @@ jobs:
           PUB_EPOCH='${{ steps.rel_fetch.outputs.pub_epoch }}'
           BODY_RAW='${{ steps.rel_fetch.outputs.body }}'
 
-          # Limpeza do corpo: remove linhas redundantes (nome/versão), remove cabeçalho "## <tag>", colapsa múltiplas linhas em uma só
+          # Limpeza do corpo: remove linhas redundantes (nome/versão), remove cabeçalho "## <tag>", colapsa múltiplas linhas vazias
           BODY_CLEAN=$(printf "%s\n" "$BODY_RAW" \
             | sed -E "s/\r//g" \
             | sed -E "/^${TAG//./\\.}\$/Id" \
@@ -72,7 +67,6 @@ jobs:
             | sed -E "s/^##[[:space:]]*${TAG//./\\.}.*//I" \
             | awk 'BEGIN{blank=0} { if(length($0)==0){ if(blank==0){ print ""; blank=1 } } else { print; blank=0 } }')
 
-          # Enxuga espaços das bordas e limita tamanho
           BODY_TRUNC=$(printf "%s" "$BODY_CLEAN" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | head -c 1400)
 
           # Usa printf para criar quebras reais (sem \n literais)
@@ -116,7 +110,7 @@ jobs:
             echo "since=$(cat .wa-js-state/last_fix_iso)" >> "$GITHUB_OUTPUT"
             echo "initial=false" >> "$GITHUB_OUTPUT"
           else
-            # sem cursor ainda -> modo bootstrap (deixa since vazio; vamos pegar um lote sem since)
+            # sem cursor ainda -> modo bootstrap (deixa since vazio)
             echo "since=" >> "$GITHUB_OUTPUT"
             echo "initial=true" >> "$GITHUB_OUTPUT"
           fi
@@ -152,12 +146,12 @@ jobs:
             COUNT=$(echo "$FILTERED" | jq 'length')
             if [ "$COUNT" -gt 0 ]; then
               ONE=$(echo "$FILTERED" | jq -c 'max_by(.date_raw)')
-              RAW=$(echo "$ONE" | jq -r .date_raw)
-              EPOCH=$(date -d "$RAW" +%s 2>/dev/null || gdate -d "$RAW" +%s)
+              EPOCH=$(echo "$ONE" | jq -r '.date_raw | fromdate? // empty')
               SHA=$(echo "$ONE" | jq -r .sha | cut -c1-7)
               URL=$(echo "$ONE" | jq -r .url)
               MSG=$(echo "$ONE" | jq -r '.msg | split("\n")[0]')
               AUTHOR=$(echo "$ONE" | jq -r .author)
+              RAW=$(echo "$ONE" | jq -r .date_raw)
 
               SUMMARY=$(printf -- "- \`%s\` — %s\n👤 %s • 🕒 <t:%s:R>\n%s\n\n\n" "$SHA" "$MSG" "$AUTHOR" "$EPOCH" "$URL")
               NEWEST="$RAW"
@@ -181,8 +175,7 @@ jobs:
 
             SUMMARY=$(
               echo "$FILTERED" | jq -c '.[:5][]' | while read -r row; do
-                RAW=$(echo "$row" | jq -r .date_raw)
-                EPOCH=$(date -d "$RAW" +%s 2>/dev/null || gdate -d "$RAW" +%s)
+                EPOCH=$(echo "$row" | jq -r '.date_raw | fromdate? // empty')
                 SHA=$(echo "$row" | jq -r .sha | cut -c1-7)
                 URL=$(echo "$row" | jq -r .url)
                 MSG=$(echo "$row" | jq -r '.msg | split("\n")[0]')
@@ -215,7 +208,6 @@ jobs:
           if [ "$COUNT" -gt 5 ]; then
             EXTRA=$(printf "\n…e +%s outros" "$((COUNT-5))")
           fi
-
           DESC=$(printf "%s\n\n%s%s" "$DESC_HEADER" "$SUMMARY" "$EXTRA")
 
           payload=$(jq -n \
