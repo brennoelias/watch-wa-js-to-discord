@@ -166,13 +166,21 @@ jobs:
           # Pega o commit mais novo retornado (qualquer tipo), e gera ISO +1s pra cursor seguro
           NEWEST_PLUS=$(
             echo "$RESP" | jq -r '
-              (max_by(.commit.author.date) | .commit.author.date | fromdate? // empty) as $t
-              | if $t then ($t + 1 | todate) else empty end
-            '
+              if type=="array" and (length>0) then
+                (max_by(.commit.author.date) | .commit.author.date | fromdate? // empty) as $t
+                | if $t then ($t + 1 | todate) else empty end
+              else empty end
+            ' || echo ""
           )
 
           # Também guarda o SHA mais novo (pra dedupe adicional)
-          NEWEST_SHA=$(echo "$RESP" | jq -r '(max_by(.commit.author.date) | .sha) // empty')
+          NEWEST_SHA=$(
+            echo "$RESP" | jq -r '
+              if type=="array" and (length>0) then
+                try (max_by(.commit.author.date) | .sha) catch empty
+              else empty end
+            ' || echo ""
+          )
 
           {
             echo "count=$COUNT"
