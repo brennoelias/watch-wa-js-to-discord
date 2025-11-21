@@ -131,21 +131,23 @@ jobs:
             RESP=$(curl -sS "$API")
           fi
 
-          # Extrai commits relevantes e aplica dedupe por ISO e SHA
+          # Filtra commits que parecem correções + dedupe por data/sha
           FILTERED=$(
             echo "$RESP" | jq -r --arg last "${SINCE}" --arg lastsha "${LASTSHA}" '
-              map({
-                sha: .sha,
-                url: .html_url,
-                msg: .commit.message,
-                author: (.commit.author.name // "desconhecido"),
-                date_raw: .commit.author.date
-              })
-              | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
-              # estritamente depois do ISO salvo (evita repetir fronteira)
-              | map(select(($last == "") or (.date_raw > $last)))
-              # e não repetir exatamente o último SHA salvo
-              | map(select(.sha != $lastsha))
+              if type != "array" or length == 0 then
+                []
+              else
+                map({
+                  sha: .sha,
+                  url: .html_url,
+                  msg: .commit.message,
+                  author: (.commit.author.name // "desconhecido"),
+                  date_raw: .commit.author.date
+                })
+                | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
+                | map(select(($last == "") or (.date_raw > $last)))
+                | map(select(.sha != $lastsha))
+              end
             '
           )
 
@@ -153,7 +155,8 @@ jobs:
 
           # Monta SUMMARY (até 5) com timestamp relativo
           SUMMARY=$(
-            echo "$FILTERED" | jq -c '.[:5][]' | while read -r row; do
+            echo "$FILTERED" | jq -c '.[:5][]?' | while read -r row; do
+              [ -z "$row" ] && continue
               EPOCH=$(echo "$row" | jq -r '.date_raw | fromdate? // empty')
               SHA=$(echo "$row" | jq -r .sha | cut -c1-7)
               URL=$(echo "$row" | jq -r .url)
@@ -163,23 +166,27 @@ jobs:
             done
           )
 
-          # Pega o commit mais novo retornado (qualquer tipo), e gera ISO +1s pra cursor seguro
+          # Cursor seguro (ISO +1s) – só se RESP for array
           NEWEST_PLUS=$(
             echo "$RESP" | jq -r '
-              if type=="array" and (length>0) then
-                (max_by(.commit.author.date) | .commit.author.date | fromdate? // empty) as $t
-                | if $t then ($t + 1 | todate) else empty end
-              else empty end
-            ' || echo ""
+              if type != "array" or length == 0 then
+                ""
+              else
+                ([.[] | .commit.author.date | fromdate?] | max? // empty) as $t
+                | if $t then ($t + 1 | todate) else "" end
+              end
+            '
           )
 
-          # Também guarda o SHA mais novo (pra dedupe adicional)
+          # Último SHA global (para dedupe extra)
           NEWEST_SHA=$(
             echo "$RESP" | jq -r '
-              if type=="array" and (length>0) then
-                try (max_by(.commit.author.date) | .sha) catch empty
-              else empty end
-            ' || echo ""
+              if type != "array" or length == 0 then
+                ""
+              else
+                ([.[] | {sha: .sha, date: .commit.author.date}] | max_by(.date)? | .sha) // ""
+              end
+            '
           )
 
           {
