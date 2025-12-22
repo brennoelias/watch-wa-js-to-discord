@@ -23,14 +23,33 @@ jobs:
       ############################################################
       - name: Buscar último release do wa-js
         id: rel_fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           API="https://api.github.com/repos/wppconnect-team/wa-js/releases/latest"
-          RESP=$(curl -sS "$API")
-          TAG=$(echo "$RESP" | jq -r .tag_name)
-          NAME=$(echo "$RESP" | jq -r .name)
-          URL=$(echo "$RESP" | jq -r .html_url)
-          BODY=$(echo "$RESP" | jq -r .body)
-          PUB_EPOCH=$(echo "$RESP" | jq -r '.published_at | fromdate? // empty')
+
+          code=$(curl -sS -o rel.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: gh-actions-release-watcher" \
+            "$API")
+
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "GitHub API error (release) HTTP $code"
+            cat rel.json || true
+            exit 1
+          fi
+
+          jq -e . rel.json >/dev/null
+
+          TAG=$(jq -r .tag_name rel.json)
+          NAME=$(jq -r .name rel.json)
+          URL=$(jq -r .html_url rel.json)
+          BODY=$(jq -r .body rel.json)
+          PUB_EPOCH=$(jq -r '.published_at | fromdate? // empty' rel.json)
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
@@ -53,13 +72,14 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          set -euo pipefail
+
           TAG='${{ steps.rel_fetch.outputs.tag }}'
           NAME='${{ steps.rel_fetch.outputs.name }}'
           URL='${{ steps.rel_fetch.outputs.url }}'
           PUB_EPOCH='${{ steps.rel_fetch.outputs.pub_epoch }}'
           BODY_RAW='${{ steps.rel_fetch.outputs.body }}'
 
-          # Limpeza do corpo: remove linhas redundantes (nome/versão), remove cabeçalho "## <tag>", colapsa múltiplas linhas vazias
           BODY_CLEAN=$(printf "%s\n" "$BODY_RAW" \
             | sed -E "s/\r//g" \
             | sed -E "/^${TAG//./\\.}\$/Id" \
@@ -68,8 +88,6 @@ jobs:
             | awk 'BEGIN{blank=0} { if(length($0)==0){ if(blank==0){ print ""; blank=1 } } else { print; blank=0 } }')
 
           BODY_TRUNC=$(printf "%s" "$BODY_CLEAN" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | head -c 1400)
-
-          # Usa printf para criar quebras reais (sem \n literais)
           DESC=$(printf "*Publicado:* <t:%s:R>\n\n**Notas:**\n%s" "$PUB_EPOCH" "$BODY_TRUNC")
 
           payload=$(jq -n \
@@ -100,7 +118,7 @@ jobs:
           git push
 
       ############################################################
-      # 2) FIX COMMITS NA BRANCH main (com bootstrap + dedupe)
+      # 2) FIX COMMITS NA BRANCH main (dedupe + robust fetch)
       ############################################################
       - name: Ler cursor de commits (ISO e SHA)
         id: fix_state
@@ -111,49 +129,67 @@ jobs:
             echo "lastsha=$(cat .wa-js-state/last_fix_sha 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
             echo "initial=false" >> "$GITHUB_OUTPUT"
           else
-            echo "since=" >> "$GITHUB_OUTPUT"     # bootstrap
+            echo "since=" >> "$GITHUB_OUTPUT"
             echo "lastsha=" >> "$GITHUB_OUTPUT"
             echo "initial=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Buscar commits (normal ou bootstrap)
         id: fix_fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           INITIAL='${{ steps.fix_state.outputs.initial }}'
           SINCE='${{ steps.fix_state.outputs.since }}'
           LASTSHA='${{ steps.fix_state.outputs.lastsha }}'
 
           if [ "$INITIAL" = "true" ]; then
             API="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&per_page=100"
-            RESP=$(curl -sS "$API")
           else
             API="https://api.github.com/repos/wppconnect-team/wa-js/commits?sha=main&since=${SINCE}"
-            RESP=$(curl -sS "$API")
           fi
 
-          # Filtra commits que parecem correções + dedupe por data/sha
-          FILTERED=$(
-            echo "$RESP" | jq -r --arg last "${SINCE}" --arg lastsha "${LASTSHA}" '
-              if type != "array" or length == 0 then
-                []
-              else
-                map({
-                  sha: .sha,
-                  url: .html_url,
-                  msg: .commit.message,
-                  author: (.commit.author.name // "desconhecido"),
-                  date_raw: .commit.author.date
-                })
-                | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
-                | map(select(($last == "") or (.date_raw > $last)))
-                | map(select(.sha != $lastsha))
-              end
-            '
-          )
+          code=$(curl -sS -o commits.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "User-Agent: gh-actions-fix-watcher" \
+            "$API")
 
-          COUNT=$(echo "$FILTERED" | jq 'length')
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "GitHub API error (commits) HTTP $code"
+            cat commits.json || true
+            exit 1
+          fi
 
-          # Monta SUMMARY (até 5) com timestamp relativo
+          jq -e . commits.json >/dev/null
+
+          # Garante que commits.json é array (senão, vira [])
+          if [ "$(jq -r 'type' commits.json)" != "array" ]; then
+            echo "Resposta de commits não é array. Conteúdo:"
+            cat commits.json
+            # força array vazio pra não quebrar
+            echo '[]' > commits.json
+          fi
+
+          # Filtra fixes + dedupe por ISO e SHA
+          FILTERED=$(jq -c --arg last "${SINCE}" --arg lastsha "${LASTSHA}" '
+            map({
+              sha: .sha,
+              url: .html_url,
+              msg: .commit.message,
+              author: (.commit.author.name // "desconhecido"),
+              date_raw: .commit.author.date
+            })
+            | map(select(.msg | test("(?i)\\bfix|hotfix|bug|patch\\b")))
+            | map(select(($last == "") or (.date_raw > $last)))
+            | map(select(.sha != $lastsha))
+          ' commits.json)
+
+          COUNT=$(echo "$FILTERED" | jq -r 'length')
+
           SUMMARY=$(
             echo "$FILTERED" | jq -c '.[:5][]?' | while read -r row; do
               [ -z "$row" ] && continue
@@ -166,28 +202,24 @@ jobs:
             done
           )
 
-          # Cursor seguro (ISO +1s) – só se RESP for array
-          NEWEST_PLUS=$(
-            echo "$RESP" | jq -r '
-              if type != "array" or length == 0 then
-                ""
-              else
-                ([.[] | .commit.author.date | fromdate?] | max? // empty) as $t
-                | if $t then ($t + 1 | todate) else "" end
-              end
-            '
-          )
+          # Cursor seguro: pega o maior author.date, soma 1s e converte pra ISO
+          NEWEST_PLUS=$(jq -r '
+            if length == 0 then
+              ""
+            else
+              ([.[] | .commit.author.date | fromdate?] | max) as $t
+              | ($t + 1 | todate)
+            end
+          ' commits.json)
 
-          # Último SHA global (para dedupe extra)
-          NEWEST_SHA=$(
-            echo "$RESP" | jq -r '
-              if type != "array" or length == 0 then
-                ""
-              else
-                ([.[] | {sha: .sha, date: .commit.author.date}] | max_by(.date)? | .sha) // ""
-              end
-            '
-          )
+          # SHA mais novo global (sem operador ?. )
+          NEWEST_SHA=$(jq -r '
+            if length == 0 then
+              ""
+            else
+              ([.[] | {sha: .sha, date: .commit.author.date}] | max_by(.date) | .sha) // ""
+            end
+          ' commits.json)
 
           {
             echo "count=$COUNT"
@@ -203,6 +235,8 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          set -euo pipefail
+
           COUNT='${{ steps.fix_fetch.outputs.count }}'
           SUMMARY='${{ steps.fix_fetch.outputs.summary }}'
 
@@ -227,16 +261,16 @@ jobs:
 
           curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
 
-      - name: Avançar cursor de commits (sempre que houver referência)
+      - name: Avançar cursor de commits
         if: steps.fix_fetch.outputs.newest_plus != '' || steps.fix_fetch.outputs.newest_sha != ''
         run: |
           mkdir -p .wa-js-state
-          # Atualiza ISO (cursor +1s) se existir
+
           if [ -n '${{ steps.fix_fetch.outputs.newest_plus }}' ]; then
             echo '${{ steps.fix_fetch.outputs.newest_plus }}' > .wa-js-state/last_fix_iso
             git add .wa-js-state/last_fix_iso
           fi
-          # Atualiza SHA mais novo (para dedupe) se existir
+
           if [ -n '${{ steps.fix_fetch.outputs.newest_sha }}' ]; then
             echo '${{ steps.fix_fetch.outputs.newest_sha }}' > .wa-js-state/last_fix_sha
             git add .wa-js-state/last_fix_sha
