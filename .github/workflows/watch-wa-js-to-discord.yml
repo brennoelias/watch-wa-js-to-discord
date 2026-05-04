@@ -115,15 +115,19 @@ jobs:
             if [ -n "$PUB_EPOCH" ]; then
               PUB_HUMAN=$(date -u -d "@$PUB_EPOCH" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || true)
             fi
-            TG_TEXT=$(printf '🧩 Nova versão: %s\n%s\n\n%s\n\nPublicado: %s\n\nNotas:\n%s' \
-              "$TAG" "$NAME" "$URL" "${PUB_HUMAN:-—}" "$BODY_TRUNC")
-            TG_TEXT=$(printf "%s" "$TG_TEXT" | head -c 4000)
+            TG_TEXT=$(jq -n \
+              --arg tag "$TAG" \
+              --arg name "$NAME" \
+              --arg url "$URL" \
+              --arg pub "${PUB_HUMAN:-—}" \
+              --arg body "$BODY_TRUNC" \
+              '{tag:$tag,name:$name,url:$url,pub:$pub,body:$body}' | python3 scripts/telegram_html_message.py release)
             while IFS= read -r cid; do
               [ -z "$cid" ] && continue
               tg_payload=$(jq -n \
                 --arg chat_id "$cid" \
                 --arg text "$TG_TEXT" \
-                '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+                '{chat_id: $chat_id, text: $text, parse_mode: "HTML", disable_web_page_preview: true}')
               curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -H "Content-Type: application/json" \
                 -d "$tg_payload"
@@ -287,15 +291,14 @@ jobs:
           curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
 
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-            SUMMARY_TG=$(printf "%s" "$SUMMARY" | python3 -c "import re,sys;from datetime import datetime,timezone;t=sys.stdin.read();print(re.sub(r'<t:(\d+):R>',lambda m:datetime.fromtimestamp(int(m.group(1)),tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),t))")
-            TG_TEXT=$(printf '🛠️ Fix commits na main (wppconnect-team/wa-js)\n\n— Últimos fixes —\n\n%s%s' "$SUMMARY_TG" "$EXTRA")
-            TG_TEXT=$(printf "%s" "$TG_TEXT" | head -c 4000)
+            export TG_EXTRA="${EXTRA:-}"
+            TG_TEXT=$(printf '%s' "$SUMMARY" | python3 scripts/telegram_html_message.py fixes)
             while IFS= read -r cid; do
               [ -z "$cid" ] && continue
               tg_payload=$(jq -n \
                 --arg chat_id "$cid" \
                 --arg text "$TG_TEXT" \
-                '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+                '{chat_id: $chat_id, text: $text, parse_mode: "HTML", disable_web_page_preview: true}')
               curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -H "Content-Type: application/json" \
                 -d "$tg_payload"
