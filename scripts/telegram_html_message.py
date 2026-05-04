@@ -53,27 +53,25 @@ def inline_format_line(s: str) -> str:
 
 
 def format_text_chunk(chunk: str) -> str:
-    """Parágrafos / listas / títulos → HTML Telegram (sem <pre> no bloco todo)."""
-    out: list[str] = []
+    """Parágrafos / listas / títulos → HTML Telegram (quebras = \\n; <br> não é suportado)."""
+    lines_out: list[str] = []
     for line in chunk.split("\n"):
         raw = line.rstrip("\r")
         if not raw.strip():
-            out.append("<br>")
+            lines_out.append("")
             continue
         if re.match(r"^#{1,6}\s+", raw):
             rest = re.sub(r"^#{1,6}\s+", "", raw)
-            out.append("<b>" + inline_format_line(rest) + "</b><br>")
+            lines_out.append("<b>" + inline_format_line(rest) + "</b>")
         elif re.match(r"^[\*\-]\s+", raw):
             rest = re.sub(r"^[\*\-]\s+", "", raw)
-            out.append("• " + inline_format_line(rest) + "<br>")
+            lines_out.append("• " + inline_format_line(rest))
         elif re.match(r"^\d+\.\s+", raw):
             rest = re.sub(r"^\d+\.\s+", "", raw)
-            out.append("• " + inline_format_line(rest) + "<br>")
+            lines_out.append("• " + inline_format_line(rest))
         else:
-            out.append(inline_format_line(raw) + "<br>")
-    s = "".join(out)
-    s = re.sub(r"(?:<br>)+$", "", s)
-    return s
+            lines_out.append(inline_format_line(raw))
+    return "\n".join(lines_out).rstrip("\n")
 
 
 def changelog_to_telegram_html(body: str) -> str:
@@ -96,7 +94,7 @@ def changelog_to_telegram_html(body: str) -> str:
         pos = m.end()
     if pos < len(body):
         parts.append(format_text_chunk(body[pos:]))
-    return "".join(parts)
+    return "\n".join(parts)
 
 
 def build_release() -> str:
@@ -156,9 +154,9 @@ def build_fixes(raw: str) -> str:
             link = f'<a href="{u}">Ver commit</a>' if url.startswith("http") else esc(url)
             blocks.append(
                 "<blockquote>"
-                f"<b><code>{esc(sha)}</code></b><br>"
-                f"{inline_format_line(msg)}<br><br>"
-                f"<i>{esc(meta)}</i><br>"
+                f"<b><code>{esc(sha)}</code></b>\n"
+                f"{inline_format_line(msg)}\n\n"
+                f"<i>{esc(meta)}</i>\n"
                 f"{link}"
                 "</blockquote>"
             )
