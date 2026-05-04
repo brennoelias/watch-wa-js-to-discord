@@ -1,4 +1,4 @@
-name: Watch wa-js -> Discord (releases + fix commits)
+name: Watch wa-js -> Discord e Telegram (releases + fix commits)
 
 on:
   schedule:
@@ -66,10 +66,12 @@ jobs:
           mkdir -p .wa-js-state
           echo "last=$(cat .wa-js-state/last_tag 2>/dev/null || echo '')" >> "$GITHUB_OUTPUT"
 
-      - name: Posta no Discord (se release mudou)
+      - name: Posta no Discord e Telegram (se release mudou)
         if: steps.rel_fetch.outputs.tag != steps.rel_state.outputs.last && steps.rel_fetch.outputs.tag != 'null'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
 
@@ -107,6 +109,26 @@ jobs:
             }')
 
           curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            PUB_HUMAN=""
+            if [ -n "$PUB_EPOCH" ]; then
+              PUB_HUMAN=$(date -u -d "@$PUB_EPOCH" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || true)
+            fi
+            TG_TEXT=$(printf '🧩 Nova versão: %s\n%s\n\n%s\n\nPublicado: %s\n\nNotas:\n%s' \
+              "$TAG" "$NAME" "$URL" "${PUB_HUMAN:-—}" "$BODY_TRUNC")
+            TG_TEXT=$(printf "%s" "$TG_TEXT" | head -c 4000)
+            while IFS= read -r cid; do
+              [ -z "$cid" ] && continue
+              tg_payload=$(jq -n \
+                --arg chat_id "$cid" \
+                --arg text "$TG_TEXT" \
+                '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+              curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "$tg_payload"
+            done < <(printf '%s' "$TELEGRAM_CHAT_ID" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+          fi
 
       - name: Atualiza estado de release
         if: steps.rel_fetch.outputs.tag != steps.rel_state.outputs.last && steps.rel_fetch.outputs.tag != 'null'
@@ -231,10 +253,12 @@ jobs:
             echo "newest_sha=$NEWEST_SHA"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Postar no Discord (se houver fix-commits)
+      - name: Postar no Discord e Telegram (se houver fix-commits)
         if: steps.fix_fetch.outputs.count != '0'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
 
@@ -261,6 +285,30 @@ jobs:
             }')
 
           curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
+
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            SUMMARY_TG=$(printf "%s" "$SUMMARY" | python3 -c "
+import re, sys
+from datetime import datetime, timezone
+text = sys.stdin.read()
+def repl(m):
+    ts = int(m.group(1))
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+print(re.sub(r'<t:(\d+):R>', repl, text))
+")
+            TG_TEXT=$(printf '🛠️ Fix commits na main (wppconnect-team/wa-js)\n\n— Últimos fixes —\n\n%s%s' "$SUMMARY_TG" "$EXTRA")
+            TG_TEXT=$(printf "%s" "$TG_TEXT" | head -c 4000)
+            while IFS= read -r cid; do
+              [ -z "$cid" ] && continue
+              tg_payload=$(jq -n \
+                --arg chat_id "$cid" \
+                --arg text "$TG_TEXT" \
+                '{chat_id: $chat_id, text: $text, disable_web_page_preview: true}')
+              curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -H "Content-Type: application/json" \
+                -d "$tg_payload"
+            done < <(printf '%s' "$TELEGRAM_CHAT_ID" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+          fi
 
       - name: Avançar cursor de commits
         if: steps.fix_fetch.outputs.newest_plus != '' || steps.fix_fetch.outputs.newest_sha != ''
