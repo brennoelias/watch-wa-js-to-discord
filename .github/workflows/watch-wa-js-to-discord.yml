@@ -287,15 +287,7 @@ jobs:
           curl -sS -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL"
 
           if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-            SUMMARY_TG=$(printf "%s" "$SUMMARY" | python3 -c "
-import re, sys
-from datetime import datetime, timezone
-text = sys.stdin.read()
-def repl(m):
-    ts = int(m.group(1))
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-print(re.sub(r'<t:(\d+):R>', repl, text))
-")
+            SUMMARY_TG=$(printf "%s" "$SUMMARY" | python3 -c "import re,sys;from datetime import datetime,timezone;t=sys.stdin.read();print(re.sub(r'<t:(\d+):R>',lambda m:datetime.fromtimestamp(int(m.group(1)),tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),t))")
             TG_TEXT=$(printf '🛠️ Fix commits na main (wppconnect-team/wa-js)\n\n— Últimos fixes —\n\n%s%s' "$SUMMARY_TG" "$EXTRA")
             TG_TEXT=$(printf "%s" "$TG_TEXT" | head -c 4000)
             while IFS= read -r cid; do
