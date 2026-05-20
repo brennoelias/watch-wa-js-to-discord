@@ -89,7 +89,9 @@ jobs:
             | sed -E "s/^##[[:space:]]*${TAG//./\\.}.*//I" \
             | awk 'BEGIN{blank=0} { if(length($0)==0){ if(blank==0){ print ""; blank=1 } } else { print; blank=0 } }')
 
+          set +o pipefail
           BODY_TRUNC=$(printf "%s" "$BODY_CLEAN" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | head -c 1400)
+          set -o pipefail
 
           DESC=$(printf "*Publicado:* <t:%s:R>\n\n**Notas:**\n%s" "$PUB_EPOCH" "$BODY_TRUNC")
 
@@ -135,7 +137,7 @@ jobs:
           fi
 
       - name: Atualiza estado de release
-        if: steps.rel_fetch.outputs.tag != steps.rel_state.outputs.last && steps.rel_fetch.outputs.tag != 'null'
+        if: (success() || failure()) && steps.rel_fetch.outputs.tag != steps.rel_state.outputs.last && steps.rel_fetch.outputs.tag != 'null'
         run: |
           echo '${{ steps.rel_fetch.outputs.tag }}' > .wa-js-state/last_tag
           git config user.name "github-actions[bot]"
@@ -306,7 +308,7 @@ jobs:
           fi
 
       - name: Avançar cursor de commits
-        if: steps.fix_fetch.outputs.newest_plus != '' || steps.fix_fetch.outputs.newest_sha != ''
+        if: (success() || failure()) && (steps.fix_fetch.outputs.newest_plus != '' || steps.fix_fetch.outputs.newest_sha != '')
         run: |
           mkdir -p .wa-js-state
 
